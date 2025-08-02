@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+openai
+langchain
+faiss-cpu
+pdfplumber
+python-docx
+requests
+pydantic

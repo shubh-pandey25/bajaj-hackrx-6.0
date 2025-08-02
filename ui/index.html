@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Policy QA Assistant</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      background: #f5f7fa;
+    }
+    h1 { color: #333; }
+    input, textarea, button {
+      margin: 10px 0;
+      padding: 10px;
+      width: 100%;
+      font-size: 1em;
+    }
+    button {
+      background-color: #007bff;
+      color: white;
+      border: none;
+      cursor: pointer;
+    }
+    .output {
+      background: #fff;
+      padding: 15px;
+      margin-top: 20px;
+      border: 1px solid #ddd;
+    }
+  </style>
+</head>
+<body>
+  <h1>🧠 Policy Q&A System</h1>
+
+  <label>Select Policy Document (.pdf or .docx):</label>
+  <input type="file" id="fileInput" />
+
+  <label>Enter Your Questions (comma-separated):</label>
+  <textarea id="questionInput" rows="4" placeholder="E.g. Does it cover knee surgery?, What is the waiting period?"></textarea>
+
+  <button onclick="submitForm()">Ask Questions</button>
+
+  <div class="output" id="responseBox"></div>
+
+  <script>
+    async function submitForm() {
+      const file = document.getElementById("fileInput").files[0];
+      const questionsText = document.getElementById("questionInput").value;
+      const responseBox = document.getElementById("responseBox");
+
+      if (!file || !questionsText) {
+        alert("Please upload a file and enter questions.");
+        return;
+      }
+
+      responseBox.innerHTML = "Processing...";
+
+      try {
+        // Upload file
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const uploadRes = await fetch("http://127.0.0.1:8000/hackrx/upload", {
+          method: "POST",
+          body: formData,
+          headers: {
+            "Authorization": "Bearer hackrx-secret-token"
+          }
+        });
+
+        if (!uploadRes.ok) {
+          throw new Error(`Upload failed: ${await uploadRes.text()}`);
+        }
+
+        const { doc_id } = await uploadRes.json();
+
+        // Process questions
+        const questions = questionsText.split(",").map(q => q.trim()).filter(q => q);
+        
+        const queryRes = await fetch("http://127.0.0.1:8000/hackrx/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer hackrx-secret-token",
+            "Accept": "application/json"
+          },
+          body: JSON.stringify({
+            documents: doc_id,  // Send the document ID directly
+            questions: questions
+          })
+        });
+
+        if (!queryRes.ok) {
+          throw new Error(`Query failed: ${await queryRes.text()}`);
+        }
+
+        const data = await queryRes.json();
+        responseBox.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+
+      } catch (err) {
+        console.error(err);
+        responseBox.innerHTML = `<b style="color:red">❌ Error:</b> ${err.message}`;
+      }
+    }
+  </script>
+</body>
+</html>
