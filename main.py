@@ -1,151 +1,177 @@
-import os
-import fitz  # PyMuPDF
-import docx
-import tempfile
-import requests
-import time
-from typing import List
+# main.py
 
-import faiss
-import numpy as np
+
+import os
+import time
+import shutil
+import requests  # For downloading documents from URL
+
+import fitz          # PyMuPDF
+import docx
+import chromadb
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import httpx
-import shutil
-import json
-from app.llm.answer_generator import generate_answer
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-# Load env vars
+from app.llm.answer_generator import generate_answer
+
+# ─── Load environment variables ────────────────────────────────────────────────
 load_dotenv()
+API_TOKEN          = os.getenv("API_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-API_TOKEN = os.getenv("API_TOKEN")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY")
 
+CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "hackrx_collection")
+
+# ─── Instantiate ChromaDB client (in-memory mode) ─────────────────────────────
+# No args → avoids version mismatches
+chroma_client = chromadb.Client()
+collection    = chroma_client.get_or_create_collection(name=CHROMA_COLLECTION_NAME)
+
+# ─── FastAPI setup ────────────────────────────────────────────────────────────
 app = FastAPI(title="HackRX Full Solution API")
-
-# Update CORS middleware with specific origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]
 )
-
-# Mount the UI directory
 app.mount("/ui", StaticFiles(directory="ui"), name="ui")
 
-# --- CORS Middleware ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # You can restrict this to your frontend origin
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+embedder  = SentenceTransformer("all-MiniLM-L6-v2")
+doc_store: dict[str, str] = {}
 
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# ─── Pydantic models ──────────────────────────────────────────────────────────
 
-# Store uploaded file paths temporarily
-doc_store = {}
-
-# ------------------- Models -------------------
-class QuestionRequest(BaseModel):
-    doc_id: str
-    questions: List[str]
+# Updated model for /hackrx/run
+class QueryRequest(BaseModel):
+    documents: str  # URL
+    questions: list[str]
 
 class SummarizeRequest(BaseModel):
-    clauses: List[str]
+    clauses: list[str]
 
-# ------------------- Utilities -------------------
-def parse_document(file_path):
-    if file_path.endswith(".pdf"):
-        with fitz.open(file_path) as doc:
-            return "\n".join([page.get_text() for page in doc])
-    elif file_path.endswith(".docx"):
-        doc = docx.Document(file_path)
-        return "\n".join([p.text for p in doc.paragraphs])
-    else:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+def parse_document(path: str) -> str:
+    if path.endswith(".pdf"):
+        with fitz.open(path) as d:
+            return "\n".join(page.get_text() for page in d)
+    if path.endswith(".docx"):
+        doc = docx.Document(path)
+        return "\n".join(p.text for p in doc.paragraphs)
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 
-def chunk_text(text, chunk_size=500):
+def chunk_text(text: str, chunk_size: int = 500) -> list[str]:
     words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-
-def build_faiss_index(chunks):
-    embeddings = embedder.encode(chunks)
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings))
-    return index, embeddings
-
-def retrieve_chunks(query, chunks, index, embeddings, top_k=3):
-    query_embedding = embedder.encode([query])
-    distances, indices = index.search(np.array(query_embedding), top_k)
-    return [chunks[i] for i in indices[0]]
+    return [
+        " ".join(words[i : i + chunk_size])
+        for i in range(0, len(words), chunk_size)
+    ]
 
 def rule_based_summary(clause: str) -> str:
-    clause_l = clause.lower()
-    if "pre-approve" in clause_l:
+    cl = clause.lower()
+    if "pre-approve" in cl:
         return "Allowed with prior approval."
-    elif "not covered" in clause_l or "excluded" in clause_l:
+    if "not covered" in cl or "excluded" in cl:
         return "This clause excludes coverage."
-    elif "if" in clause_l and ("must" in clause_l or "require" in clause_l):
+    if "if" in cl and ("must" in cl or "require" in cl):
         return "Allowed under conditions."
-    elif "only if" in clause_l:
+    if "only if" in cl:
         return "Limited coverage depending on criteria."
     return clause.strip()[:120] + "..."
 
-# ------------------- API Endpoints -------------------
-
+# ─── API Endpoints ────────────────────────────────────────────────────────────
 @app.post("/hackrx/upload")
 async def upload_doc(file: UploadFile = File(...), request: Request = None):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(401, "Unauthorized")
 
-    file_ext = os.path.splitext(file.filename)[-1]
-    temp_path = f"temp_{int(time.time())}{file_ext}"
+    ext       = os.path.splitext(file.filename)[1]
+    temp_path = f"temp_{int(time.time())}{ext}"
     with open(temp_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    doc_id = os.path.basename(temp_path)
-    doc_store[doc_id] = temp_path
+    doc_id             = os.path.basename(temp_path)
+    doc_store[doc_id]  = temp_path
+
+    raw_text   = parse_document(temp_path)
+    chunks     = chunk_text(raw_text)
+    embeddings = embedder.encode(chunks).tolist()
+
+    ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
+    metadatas = [{"doc_id": doc_id} for _ in chunks]
+
+    collection.add(
+        ids=ids,
+        embeddings=embeddings,
+        metadatas=metadatas,
+        documents=chunks,
+    )
+
     return {"doc_id": doc_id}
 
+
+# Helper to download document from URL
+def download_document(url: str, save_dir: str = ".", prefix: str = "remote_") -> str:
+    local_filename = prefix + os.path.basename(url.split("?")[0])
+    local_path = os.path.join(save_dir, local_filename)
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(local_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+    return local_path
+
 @app.post("/hackrx/run")
-async def run_question(body: QuestionRequest, request: Request):
+async def run_question(body: QueryRequest, request: Request):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(401, "Unauthorized")
 
-    if body.doc_id not in doc_store:
-        print(f"Document not found: {body.doc_id}")
-        raise HTTPException(status_code=404, detail="Document not found")
+    # Download and process the document from the URL
+    try:
+        local_path = download_document(body.documents)
+    except Exception as e:
+        raise HTTPException(400, f"Failed to download document: {e}")
 
-    print(f"Processing questions for doc_id: {body.doc_id}")
-    start = time.time()
-    file_path = doc_store[body.doc_id]
-    raw_text = parse_document(file_path)
-    chunks = chunk_text(raw_text)
-    index, embeddings = build_faiss_index(chunks)
+    doc_id = os.path.basename(local_path)
+    if doc_id not in doc_store:
+        raw_text   = parse_document(local_path)
+        chunks     = chunk_text(raw_text)
+        embeddings = embedder.encode(chunks).tolist()
+
+        ids       = [f"{doc_id}_{i}" for i in range(len(chunks))]
+        metadatas = [{"doc_id": doc_id} for _ in chunks]
+
+        collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            documents=chunks,
+        )
+        doc_store[doc_id] = local_path
 
     answers = []
     for question in body.questions:
-        print(f"Processing question: {question}")
-        relevant_chunks = retrieve_chunks(question, chunks, index, embeddings)
-        if "cataract" in question.lower():
-            print(f"Found relevant chunks for cataract: {relevant_chunks}")
-        # Use the simplified answer generator
-        answer = await generate_answer(question, relevant_chunks)
-        answer["latency"] = round(time.time() - start, 3)
-        answers.append(answer)
+        q_emb   = embedder.encode([question]).tolist()
+        result  = collection.query(
+            query_embeddings=q_emb,
+            n_results=3,
+            where={"doc_id": doc_id},
+        )
+        chunks_ = result["documents"][0]
+        raw = await generate_answer(question, chunks_)
+        # Only append the answer string
+        if isinstance(raw, dict) and "answer" in raw:
+            answers.append(raw["answer"])
+        else:
+            answers.append(str(raw))
 
     return {"answers": answers}
 
@@ -153,6 +179,5 @@ async def run_question(body: QuestionRequest, request: Request):
 async def summarize_endpoint(body: SummarizeRequest, request: Request):
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    summaries = [rule_based_summary(c) for c in body.clauses]
-    return {"summaries": summaries}
+        raise HTTPException(401, "Unauthorized")
+    return {"summaries": [rule_based_summary(c) for c in body.clauses]}

@@ -74,8 +74,7 @@ def extract_relevant_sentences(chunk, question):
     
     return [chunk[:500]]
 
-async def process_document(blob_url: str):
-    file_path = download_document(blob_url)
+def process_document(file_path: str):
     text = extract_text(file_path)
     chunks = chunk_text(text)
     embeddings = embedder.encode(chunks)

@@ -1,39 +1,59 @@
+# app/llm/answer_generator.py
+
 import os
-import time
-import json
-import asyncio
 import httpx
-import re
 from dotenv import load_dotenv
 
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
 
-async def generate_answer(question: str, relevant_chunks: list) -> str:
-    """Return string answer instead of JSON object to match API spec"""
-    start_time = time.time()
-    context = relevant_chunks[0] if relevant_chunks else ""
-    
-    # Common policy terms pattern matching
-    patterns = {
-        "grace period": r"grace period of (\d+) days",
-        "waiting period": r"waiting period of (\d+)(?:\s*\(?\s*\d+\s*\)?)\s*(?:years|months)",
-        "maternity": r"(?:maternity[^.]*(?:expenses|coverage)[^.]*\.)",
-        "cataract": r"(?:waiting period[^.]*cataract[^.]*\.)",
-        "organ donor": r"(?:organ donor[^.]*covered[^.]*\.)",
-        "no claim": r"(?:no claim discount[^.]*\.)",
-        "health check": r"(?:health check[^.]*\.)",
-        "hospital": r"(?:hospital is defined as[^.]*\.)",
-        "ayush": r"(?:ayush[^.]*treatment[^.]*\.)",
-        "room rent": r"(?:room rent[^.]*cap[^.]*\.)"
+async def generate_answer(question: str, relevant_chunks: list[str], answer_only: bool = False):
+    """
+    Performs retrieval-augmented generation over the provided chunks.
+    If answer_only is True, returns just the answer string. Otherwise returns dict.
+    """
+    # 1. Build context—join up to 5 chunks
+    top_chunks = relevant_chunks[:5]
+    context = "\n\n---\n\n".join(top_chunks)
+
+    # 2. Craft the prompt
+    prompt = f"""
+You are a health-insurance policy expert.  Use ONLY the information in the “CONTEXT” below.
+If the policy does not cover the question, say “Not covered under this policy.”
+
+CONTEXT:
+{context}
+
+QUESTION:
+{question}
+
+Answer concisely with reference to the relevant section if possible.
+"""
+
+    # 3. Call the LLM
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type":  "application/json",
     }
-    
-    for key, pattern in patterns.items():
-        if key in question.lower():
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                return match.group(0).strip()
-    
-    # Default response for unmatched patterns
-    return context.split('.')[0] + '.'
+    body = {
+        "model":       "gpt-4o-mini",     # or your preferred model
+        "messages":    [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens":  300,
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(OPENROUTER_URL, headers=headers, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+
+    answer_text = data["choices"][0]["message"]["content"].strip()
+
+    if answer_only:
+        return answer_text
+    return {
+        "question": question,
+        "answer":   answer_text
+    }
