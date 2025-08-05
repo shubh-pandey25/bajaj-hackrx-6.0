@@ -29,9 +29,9 @@ posthog>=2.4.0
 tqdm>=4.65.0
 
 # Pin transformers and tokenizers to avoid Rust build issues on Render
+
 transformers==4.33.3
 tokenizers==0.13.3
-PyYAML==>6.0 --only-binary=:all:
-Cython
+PyYAML>=6.0 --only-binary=:all:
 
 # hnswlib is NOT required and should not be added unless necessary
