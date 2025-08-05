@@ -8,7 +8,8 @@ python-docx
 requests
 pydantic==1.10.13
 numpy
-chromadb>=0.4.0
+pypika>=0.48.9
+chromadb==0.4.15
 duckdb
 sentence-transformers
 pymupdf
