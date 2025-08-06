@@ -9,6 +9,7 @@ requests
 pydantic==1.10.13
 numpy
 chromadb==0.4.15
+chroma-hnswlib==0.7.3
 duckdb
 sentence-transformers
 pymupdf
