@@ -1,6 +1,6 @@
 duckdb
 fastapi
-uvicorn[standard]
+uvicorn[standard]==0.22.0
 openai==1.76.0
 langchain
 faiss-cpu
