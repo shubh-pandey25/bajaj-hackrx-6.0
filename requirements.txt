@@ -1,7 +1,7 @@
 duckdb
 fastapi
 uvicorn[standard]
-openai
+opeopenai==1.76.0
 langchain
 faiss-cpu
 pdfplumber
