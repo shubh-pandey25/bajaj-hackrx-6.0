@@ -2,7 +2,7 @@ duckdb
 fastapi
 uvicorn[standard]==0.22.0
 openai==1.76.0
-langchain
+langchain==0.1.19
 faiss-cpu
 pdfplumber
 python-docx
